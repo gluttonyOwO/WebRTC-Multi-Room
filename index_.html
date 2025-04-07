@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Client</title>
+</head>
+<body>
+    <h1>WebRTC Client</h1>
+    <video id="remoteVideo" autoplay  style="width: 640px; height: 360px;"></video>
+    <script>
+        const serverUrl = 'ws://rtc.o3o.tw:8443'; // 訊號伺服器 URL
+        const roomId = '998'; // 房間名稱
+        const localId = `peer_${Math.floor(Math.random() * 1000)}`;
+
+        const websocket = new WebSocket(serverUrl);
+
+        let pc; // RTCPeerConnection 實例
+
+        const iceServers = {
+            iceServers: [
+                { urls: 'stun:rtc.o3o.tw' },
+                {
+                    urls: 'turn:rtc.o3o.tw',
+                    credential: 'mirdc',
+                    username: 'mirdc'
+                }
+            ],
+            //iceTransportPolicy: "relay",
+            //sdpSemantics: "unified-plan",
+        };
+
+        websocket.onopen = () => {
+            console.log('WebSocket connected');
+            websocket.send(`HELLO ${localId}`);
+        };
+
+        websocket.onmessage = async (event) => {
+            console.log('onmessage');
+            const message = event.data;
+            console.log('Received:', message);
+            if (message.startsWith('HELLO')) {
+                websocket.send(`ROOM ${roomId}`);
+            }
+            if (message.startsWith('ROOM_OK')) {
+                console.log('Joined room');
+            } else if (message.startsWith('ROOM_PEER_MSG')) {
+                console.log('ROOM_PEER_MSG');
+
+                const [, peerId, msg] = message.split(' ', 3);
+                console.log(peerId);
+
+                let message_ = message.replace(peerId, '').replace('ROOM_PEER_MSG', '');
+                console.log(message_);
+                const parsedMsg = JSON.parse(message_);
+
+                if (parsedMsg.sdp) {
+                    const { type, sdp } = parsedMsg.sdp;
+                    if (type === 'offer') {
+                        await handleOffer(sdp, peerId);
+                    }
+                } else if (parsedMsg.ice) {
+                    const { candidate, sdpMLineIndex, sdpMid } = parsedMsg.ice;
+                    if (!candidate) {
+                        console.warn("Skipping empty ICE candidate.");
+                        return;
+                    }
+                    //if (candidate.includes("relay")){
+                        const iceCandidate = { candidate, sdpMLineIndex, sdpMid };
+                    try {
+                        
+                        await pc.addIceCandidate(new RTCIceCandidate(iceCandidate));
+                        console.log("ICE Candidate added successfully:", iceCandidate);
+                    } catch (error) {
+                        console.error("Failed to add ICE Candidate:", error);
+                    }
+                    //}
+
+                }
+            }
+        };
+
+        async function handleOffer(sdp, peerId) {
+            console.log('Received SDP Offer');
+            pc = new RTCPeerConnection(iceServers);
+            console.log("spd")
+            console.log(sdp)
+            console.log("peerid")
+            console.log(peerId)
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const iceCandidateMessage = {
+                        ice: {
+                            candidate: event.candidate.candidate,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex,
+                        },
+                    };
+                    websocket.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify(iceCandidateMessage)}`);
+                }
+            };
+
+            pc.ontrack = (event) => {
+                document.getElementById('remoteVideo').srcObject = event.streams[0];
+                console.log('event.streams')
+                console.log(event.streams)
+            };
+
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            const sdpAnswerMessage = {
+                sdp: { type: 'answer', sdp: answer.sdp },
+            };
+            websocket.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify(sdpAnswerMessage)}`);
+        }
+    </script>
+</body>
+</html>

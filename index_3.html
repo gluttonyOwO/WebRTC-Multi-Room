@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Gamepad + Mic + Cam Receiver</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    pre { background: #f5f5f5; padding: 10px; border-radius: 5px; }
+    video { width: 480px; height: 270px; margin-top: 10px; display: block; }
+  </style>
+</head>
+<body>
+  <h1>Gamepad + Mic + Cam Receiver</h1>
+
+
+
+  <h2>📷 接收影像 (Room 6)</h2>
+  <video id="camVideo" autoplay playsinline controls muted></video>
+  <h2>🎧 接收音訊 (Room 5)</h2>
+  <audio id="micAudio" controls autoplay></audio>
+  <h2>🎮 接收到的 DataChannel 資料 (Room 4)</h2>
+  <pre id="output">尚未接收到資料</pre>
+
+  <script>
+    const serverUrl = 'ws://rtc.o3o.tw:8443';
+
+    const iceServers = {
+      iceServers: [
+        { urls: 'stun:rtc.o3o.tw' },
+        {
+          urls: 'turn:rtc.o3o.tw',
+          credential: 'mirdc1',
+          username: 'mirdc1'
+        }
+      ]
+    };
+
+    // === Room 4: Gamepad Receiver ===
+    const roomId4 = '4';
+    const localId4 = 'data_se';
+    const websocket4 = new WebSocket(serverUrl);
+    let pc4;
+
+    websocket4.onopen = () => {
+      websocket4.send(`HELLO ${localId4}`);
+      console.log("hello 4")
+
+      pc4 = new RTCPeerConnection(iceServers);
+      console.log("WebSocket connected (Room 4)");
+    };
+
+    websocket4.onmessage = async (event) => {
+      const message = event.data;
+      console.log(message);
+
+      if (message.startsWith('HELLO')) {
+        websocket4.send(`ROOM ${roomId4}`);
+      } else if (message.startsWith('ROOM_PEER_MSG')) {
+        const [, peerId, msg] = message.split(' ', 3);
+        let message_ = message.replace(peerId, '').replace('ROOM_PEER_MSG', '');
+        const parsedMsg = JSON.parse(message_);
+        if (parsedMsg.sdp?.type === 'offer') {
+          await handleOffer4(parsedMsg.sdp.sdp, peerId);
+        } else if (parsedMsg.ice) {
+          const { candidate, sdpMLineIndex } = parsedMsg.ice;
+          if (candidate) {
+            await pc4.addIceCandidate(new RTCIceCandidate({ candidate, sdpMLineIndex }));
+          }
+        }
+      }
+    };
+
+    async function handleOffer4(sdp, peerId) {
+      pc4.onicecandidate = (event) => {
+        if (event.candidate) {
+          websocket4.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({
+            ice: {
+              candidate: event.candidate.candidate,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            }
+          })}`);
+        }
+      };
+
+      pc4.ondatachannel = (event) => {
+        const channel = event.channel;
+        console.log("DataChannel received:", channel.label);
+        channel.onopen = () => console.log("DataChannel open ✅");
+        channel.onmessage = (event) => {
+          document.getElementById("output").textContent = formatJson(event.data);
+        };
+      };
+
+      await pc4.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      const answer = await pc4.createAnswer();
+      await pc4.setLocalDescription(answer);
+      websocket4.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({ sdp: { type: 'answer', sdp: answer.sdp } })}`);
+    }
+
+    function formatJson(jsonString) {
+      try {
+        return JSON.stringify(JSON.parse(jsonString), null, 2);
+      } catch (e) {
+        return jsonString;
+      }
+    }
+
+    // === Room 5: Mic Receiver ===
+    const roomId5 = '5';
+    const localId5 = 'mic_target';
+    const websocket5 = new WebSocket(serverUrl);
+    let pc5;
+
+    websocket5.onopen = () => {
+      websocket5.send(`HELLO ${localId5}`);
+      console.log("hello 5")
+
+      pc5 = new RTCPeerConnection(iceServers);
+      console.log("WebSocket connected (Room 5 - Mic)");
+    };
+
+    websocket5.onmessage = async (event) => {
+      const message = event.data;
+      console.log(message);
+
+      if (message.startsWith('HELLO')) {
+        websocket5.send(`ROOM ${roomId5}`);
+      } else if (message.startsWith('ROOM_PEER_MSG')) {
+        const [, peerId, msg] = message.split(' ', 3);
+        let message_ = message.replace(peerId, '').replace('ROOM_PEER_MSG', '');
+        const parsedMsg = JSON.parse(message_);
+        if (parsedMsg.sdp?.type === 'offer') {
+          await handleOffer5(parsedMsg.sdp.sdp, peerId);
+        } else if (parsedMsg.ice) {
+          const { candidate, sdpMLineIndex } = parsedMsg.ice;
+          if (candidate) {
+            await pc5.addIceCandidate(new RTCIceCandidate({ candidate, sdpMLineIndex }));
+          }
+        }
+      }
+    };
+
+    async function handleOffer5(sdp, peerId) {
+      pc5.onicecandidate = (event) => {
+        if (event.candidate) {
+          websocket5.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({
+            ice: {
+              candidate: event.candidate.candidate,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            }
+          })}`);
+        }
+      };
+
+      pc5.ontrack = (event) => {
+        const audioElem = document.getElementById("micAudio");
+        audioElem.srcObject = event.streams[0];
+        audioElem.play().catch(e => console.warn("Audio play() failed", e));
+      };
+
+      await pc5.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      const answer = await pc5.createAnswer();
+      await pc5.setLocalDescription(answer);
+      websocket5.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({ sdp: { type: 'answer', sdp: answer.sdp } })}`);
+    }
+
+    // === Room 6: Cam Receiver ===
+    const roomId6 = '6';
+    const localId6 = 'cam_target';
+    const websocket6 = new WebSocket(serverUrl);
+    let pc6;
+
+    websocket6.onopen = () => {
+      websocket6.send(`HELLO ${localId6}`);
+      console.log("hello 6")
+      pc6 = new RTCPeerConnection(iceServers);
+      console.log("WebSocket connected (Room 6 - Cam)");
+    };
+
+    websocket6.onmessage = async (event) => {
+      const message = event.data;
+      console.log(message);
+      if (message.startsWith('HELLO')) {
+        
+        websocket6.send(`ROOM ${roomId6}`);
+      } else if (message.startsWith('ROOM_PEER_MSG')) {
+        const [, peerId, msg] = message.split(' ', 3);
+        let message_ = message.replace(peerId, '').replace('ROOM_PEER_MSG', '');
+        const parsedMsg = JSON.parse(message_);
+        if (parsedMsg.sdp?.type === 'offer') {
+          await handleOffer6(parsedMsg.sdp.sdp, peerId);
+        } else if (parsedMsg.ice) {
+          const { candidate, sdpMLineIndex } = parsedMsg.ice;
+          if (candidate) {
+            await pc6.addIceCandidate(new RTCIceCandidate({ candidate, sdpMLineIndex }));
+          }
+        }
+      }
+    };
+
+    async function handleOffer6(sdp, peerId) {
+      pc6.onicecandidate = (event) => {
+        if (event.candidate) {
+          websocket6.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({
+            ice: {
+              candidate: event.candidate.candidate,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            }
+          })}`);
+        }
+      };
+
+      pc6.ontrack = (event) => {
+        const videoElem = document.getElementById("camVideo");
+        videoElem.srcObject = event.streams[0];
+        videoElem.play().catch(e => console.warn("Video play() failed", e));
+      };
+
+      await pc6.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      const answer = await pc6.createAnswer();
+      await pc6.setLocalDescription(answer);
+      websocket6.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({ sdp: { type: 'answer', sdp: answer.sdp } })}`);
+    }
+  </script>
+</body>
+</html>

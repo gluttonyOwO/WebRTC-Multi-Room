@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Gamepad DataChannel Sender</title>
+</head>
+<body>
+  <h1>Gamepad Sender</h1>
+
+  <script>
+    const serverUrl = 'ws://rtc.o3o.tw:8443';
+    const roomId = '998';
+    const localId = 'peer_A';
+    const targetId = 'peer_B';
+
+    const websocket = new WebSocket(serverUrl);
+    let pc;
+    let dataChannel;
+
+    const iceServers = {
+      iceServers: [
+        { urls: 'stun:rtc.o3o.tw' },
+        {
+          urls: 'turn:rtc.o3o.tw',
+          credential: 'mirdc1',
+          username: 'mirdc1'
+        }
+      ]
+    };
+
+    websocket.onopen = () => {
+      websocket.send(`HELLO ${localId}`);
+      console.log("WebSocket connected (B)");
+
+    };
+
+    websocket.onmessage = async (event) => {
+      const message = event.data;
+      console.log("Received from server:", message);
+
+      if (message.startsWith('HELLO')) {
+        websocket.send(`ROOM ${roomId}`);
+        startPeer();
+
+      } else if (message.startsWith('ROOM_PEER_MSG')) {
+        const [, peerId, msg] = message.split(' ', 3);
+        console.log(peerId);
+
+        let message_ = message.replace(peerId, '').replace('ROOM_PEER_MSG', '');
+        console.log(message_);
+        const parsedMsg = JSON.parse(message_);
+        if (parsedMsg.sdp) {
+          const { type, sdp } = parsedMsg.sdp;
+            console.log("type:"+type);
+          if (type === 'answer') {
+            console.log("answer");
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
+          }
+        } else if (parsedMsg.ice) {
+          const { candidate, sdpMLineIndex } = parsedMsg.ice;
+          if (candidate) {
+            await pc.addIceCandidate(new RTCIceCandidate({ candidate, sdpMLineIndex }));
+          }
+        }
+      }
+    };
+
+    async function startPeer() {
+      pc = new RTCPeerConnection(iceServers);
+      dataChannel = pc.createDataChannel("gamepad");
+
+      dataChannel.onopen = () => {
+        console.log("DataChannel opened ✅");
+        startGamepadLoop();
+      };
+
+
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const offerMsg = {
+        sdp:{
+            type: 'offer', sdp: offer.sdp 
+        }
+      };
+      console.log(`ROOM_PEER_MSG ${targetId} ${JSON.stringify(offerMsg)}`)
+
+      websocket.send(`ROOM_PEER_MSG ${targetId} ${JSON.stringify(offerMsg)}`);
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          const ice = {
+            ice: {
+              candidate: event.candidate.candidate,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            }
+          };
+          console.log(`ROOM_PEER_MSG ${targetId} ${JSON.stringify(ice)}`)
+          websocket.send(`ROOM_PEER_MSG ${targetId} ${JSON.stringify(ice)}`);
+        }
+      };
+    }
+
+    function startGamepadLoop() {
+      function loop() {
+        const gp = navigator.getGamepads()[0];
+        if (gp && dataChannel && dataChannel.readyState === 'open') {
+          const payload = {
+            type: 'gamepad',
+            axes: gp.axes.map(a => a.toFixed(2)),
+            buttons: gp.buttons.map(b => b.value )
+          };
+          const message = JSON.stringify(payload);
+          console.log("gamepad:", message);
+          dataChannel.send(message);
+        }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    }
+
+    window.addEventListener("gamepadconnected", () => console.log("Gamepad connected"));
+    window.addEventListener("gamepaddisconnected", () => console.log("Gamepad disconnected"));
+
+    // 啟動 Peer B 傳送端
+  </script>
+</body>
+</html>
