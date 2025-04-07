@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WebRTC Multi-Room + Gamepad</title>
+</head>
+<body>
+  <h1>WebRTC Client (3 Videos + Gamepad)</h1>
+  <div id="videos"></div>
+
+  <h2>🎮 Gamepad Status</h2>
+  <div id="gamepadStatus" style="margin-top: 10px; font-family: monospace; white-space: pre; background: #f2f2f2; padding: 10px; border-radius: 8px;"></div>
+
+  <script>
+    const serverUrl = 'ws://rtc.o3o.tw:8443';
+
+    const peerIds = ['zed_cam_1', 'zed_cam_2', 'zed_audio_3'];
+    const websockets = [];
+
+    const rooms = [
+      { roomId: '1', localId: `local-${Math.random().toString(36).substring(7)}`, muted: true },
+      { roomId: '2', localId: `local-${Math.random().toString(36).substring(7)}`, muted: true },
+      { roomId: '3', localId: `local-${Math.random().toString(36).substring(7)}`, muted: false },
+    ];
+
+    const iceServers = {
+      iceServers: [
+        { urls: 'stun:rtc.o3o.tw' },
+        {
+          urls: 'turn:rtc.o3o.tw',
+          username: 'mirdc',
+          credential: 'mirdc',
+        },
+      ],
+    };
+
+    rooms.forEach((room, index) => {
+      const fixedPeerId = peerIds[index];
+      const videoElem = document.createElement('video');
+      videoElem.id = `remoteVideo-${index}`;
+      videoElem.autoplay = true;
+      videoElem.playsInline = true;
+      if (room.muted) videoElem.muted = true;
+      if (!room.muted) videoElem.controls = true;
+      videoElem.style.width = '480px';
+      videoElem.style.height = '270px';
+      document.getElementById('videos').appendChild(videoElem);
+
+      const button = document.createElement('button');
+      button.textContent = `重啟遠端程式 (${room.roomId})`;
+      button.disabled = false;
+      button.addEventListener('click', () => {
+        const websocket = websockets[index];
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+          websocket.send(`ROOM_PEER_MSG ${fixedPeerId} "警告"`);
+          console.log(`[${room.localId}] 發送警告給 ${fixedPeerId}`);
+        }
+      });
+      document.getElementById('videos').appendChild(button);
+
+      const websocket = new WebSocket(serverUrl);
+      websockets[index] = websocket;
+      let pc;
+
+      websocket.onopen = () => {
+        console.log(`[${room.localId}] WebSocket connected`);
+        websocket.send(`HELLO ${room.localId}`);
+      };
+
+      websocket.onmessage = async (event) => {
+        const message = event.data;
+        if (message.startsWith('HELLO')) {
+          websocket.send(`ROOM ${room.roomId}`);
+        }
+
+        if (message.startsWith('ROOM_PEER_MSG')) {
+          const [, peerId, msg] = message.split(' ', 3);
+          let message_ = message.replace(peerId, '').replace('ROOM_PEER_MSG', '');
+          const parsedMsg = JSON.parse(message_);
+
+          if (parsedMsg.sdp?.type === 'offer') {
+            await handleOffer(parsedMsg.sdp.sdp, peerId);
+          } else if (parsedMsg.ice) {
+            const { candidate, sdpMLineIndex, sdpMid } = parsedMsg.ice;
+            if (!candidate) return;
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate({ candidate, sdpMLineIndex, sdpMid }));
+            } catch (err) {
+              console.error(`[${room.localId}] ICE error`, err);
+            }
+          }
+        }
+      };
+
+      async function handleOffer(sdp, peerId) {
+        pc = new RTCPeerConnection(iceServers);
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            websocket.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({
+              ice: {
+                candidate: event.candidate.candidate,
+                sdpMLineIndex: event.candidate.sdpMLineIndex,
+              }
+            })}`);
+          }
+        };
+
+        pc.ontrack = (event) => {
+          const video = document.getElementById(`remoteVideo-${index}`);
+          video.srcObject = event.streams[0];
+          video.play().catch(e => {
+            console.warn(`[${room.localId}] play() failed`, e);
+          });
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        websocket.send(`ROOM_PEER_MSG ${peerId} ${JSON.stringify({
+          sdp: { type: 'answer', sdp: answer.sdp }
+        })}`);
+      }
+    });
+
+    // === Room 4: Gamepad Sender via DataChannel ===
+    const room4 = {
+      roomId: '998',
+      localId: `local-${Math.random().toString(36).substring(7)}`,
+      targetId: 'peer_B'
+    };
+
+    const ws4 = new WebSocket(serverUrl);
+    let pc4;
+    let dataChannel4;
+
+    ws4.onopen = () => {
+      ws4.send(`HELLO ${room4.localId}`);
+      console.log("[Room 4] WebSocket connected");
+    };
+
+    ws4.onmessage = async (event) => {
+      const message = event.data;
+      if (message.startsWith('HELLO')) {
+        ws4.send(`ROOM ${room4.roomId}`);
+        startGamepadPeer();
+      } else if (message.startsWith('ROOM_PEER_MSG')) {
+        const [, peerId, msg] = message.split(' ', 3);
+        let message_ = message.replace(peerId, '').replace('ROOM_PEER_MSG', '');
+        const parsedMsg = JSON.parse(message_);
+        if (parsedMsg.sdp?.type === 'answer') {
+          await pc4.setRemoteDescription(new RTCSessionDescription(parsedMsg.sdp));
+        } else if (parsedMsg.ice) {
+          const { candidate, sdpMLineIndex } = parsedMsg.ice;
+          if (candidate) {
+            await pc4.addIceCandidate(new RTCIceCandidate({ candidate, sdpMLineIndex }));
+          }
+        }
+      }
+    };
+
+    async function startGamepadPeer() {
+      pc4 = new RTCPeerConnection(iceServers);
+      dataChannel4 = pc4.createDataChannel("gamepad");
+
+      dataChannel4.onopen = () => {
+        console.log("[Room 4] DataChannel opened ✅");
+        startGamepadLoop();
+      };
+
+      const offer = await pc4.createOffer();
+      await pc4.setLocalDescription(offer);
+
+      ws4.send(`ROOM_PEER_MSG ${room4.targetId} ${JSON.stringify({
+        sdp: { type: 'offer', sdp: offer.sdp }
+      })}`);
+
+      pc4.onicecandidate = (event) => {
+        if (event.candidate) {
+          ws4.send(`ROOM_PEER_MSG ${room4.targetId} ${JSON.stringify({
+            ice: {
+              candidate: event.candidate.candidate,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            }
+          })}`);
+        }
+      };
+    }
+
+    function startGamepadLoop() {
+      const statusElem = document.getElementById("gamepadStatus");
+
+      function loop() {
+        const gp = navigator.getGamepads()[0];
+        if (gp && dataChannel4 && dataChannel4.readyState === 'open') {
+          const payload = {
+            type: 'gamepad',
+            axes: gp.axes.map(a => +a.toFixed(2)),
+            buttons: gp.buttons.map(b => b.value)
+          };
+          dataChannel4.send(JSON.stringify(payload));
+
+          const axesStr = payload.axes.map((val, i) => `Axis ${i}: ${val}`).join('\n');
+          const buttonsStr = payload.buttons.map((val, i) => `Button ${i}: ${val}`).join('\n');
+          statusElem.textContent = `🎮 Gamepad ID: ${gp.id}\n\n${axesStr}\n\n${buttonsStr}`;
+        } else {
+          statusElem.textContent = "🔌 請插入或啟用 Gamepad 並確認 DataChannel 已連線。";
+        }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    }
+
+    window.addEventListener("gamepadconnected", () => console.log("[Room 4] Gamepad connected"));
+    window.addEventListener("gamepaddisconnected", () => console.log("[Room 4] Gamepad disconnected"));
+  </script>
+</body>
+</html>
